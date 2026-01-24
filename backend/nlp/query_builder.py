@@ -1,69 +1,72 @@
-def build_sql(parsed_data: dict) -> str:
-    """
-    Generate SQL query from parsed data dictionary.
-    Handles metric, optional group_by, and filters.
-    """
-    metric = parsed_data.get("metric")
-    group_by = parsed_data.get("group_by")
-    filters = parsed_data.get("filters", {})
-
-    # ======= MAP METRICS TO TABLES & COLUMNS =======
-    metric_map = {
+# backend/db/query_builder.py
+FORBIDDEN = ["drop", "delete", "truncate", "alter", ";--", "';--", "\";--"]
+METRIC_MAP = {
     "total_revenue": {
-        "table": "revenue",
+        "base_table": "revenue",
         "column": "revenue_amount_usd",
-        "join": None  # no join needed
-    },
-    "total_salary": {
-        "table": "employees",
-        "column": "billable_hours",
-        "join": None
+        "joins": []
     },
     "total_budget": {
-        "table": "projects",
-        "column": "revenue_amount_usd",  # actual revenue is in revenue table
-        "join": {
-            "table": "revenue",
-            "on": "projects.project_id = revenue.project_id",
-            "column": "revenue_amount_usd"
-        }
+        "base_table": "projects",
+        "column": "revenue_amount_usd",
+        "joins": [
+            ("revenue", "projects.project_id = revenue.project_id")
+        ]
     }
 }
 
-    if metric not in metric_map:
-        return ""  # unsupported metric
+def build_sql(parsed: dict) -> str:
+    metric = parsed["metric"]
+    group_by = parsed["group_by"]
+    filters = parsed["filters"]
 
-    table, column = metric_map[metric]
+    if metric not in METRIC_MAP:
+        raise ValueError(f"Unsupported metric: {metric}")
 
-    # ======= BUILD BASE SQL =======
-    sql = f"SELECT "
 
+    config = METRIC_MAP[metric]
+    base_table = config["base_table"]
+    column = config["column"]
+    joins = config["joins"]
+
+    # ---- SELECT ----
     if group_by:
-        sql += f"{group_by}, SUM({column}) AS {metric}"
+        sql = f"SELECT {group_by}, SUM({column}) AS {metric}"
     else:
-        sql += f"SUM({column}) AS {metric}"
+        sql = f"SELECT SUM({column}) AS {metric}"
 
-    sql += f" FROM {table}"
+    # ---- FROM ----
+    sql += f" FROM {base_table}"
 
-    # ======= ADD FILTERS =======
-    where_clauses = []
+    # ---- JOINS ----
+    for table, condition in joins:
+        sql += f" JOIN {table} ON {condition}"
 
-    for key, value in filters.items():
-        if key == "year" and table == "revenue":
-            where_clauses.append(f"EXTRACT(YEAR FROM revenue_date) = {value}")
-        elif key == "quarter" and table == "revenue":
-            where_clauses.append(f"EXTRACT(QUARTER FROM revenue_date) = {value}")
-        elif key in ["region", "industry", "client_id", "project_id", "employee_id"]:
-            # Assume column exists in table
-            where_clauses.append(f"{key} = '{value}'")
+    # ---- WHERE ----
+    conditions = []
 
-    if where_clauses:
-        sql += " WHERE " + " AND ".join(where_clauses)
+    for k, v in filters.items():
+        if k == "year":
+            conditions.append(f"EXTRACT(YEAR FROM revenue_date) = {v}")
+        elif k == "quarter":
+            conditions.append(f"EXTRACT(QUARTER FROM revenue_date) = {v}")
+        else:
+            conditions.append(f"{k} = '{v}'")
 
-    # ======= ADD GROUP BY =======
+    if conditions:
+        sql += " WHERE " + " AND ".join(conditions)
+
+    # ---- GROUP BY ----
     if group_by:
         sql += f" GROUP BY {group_by}"
 
-    sql += ";"
+    sql = sql + ";"
+
+    if any(word in sql.lower() for word in FORBIDDEN):
+        raise ValueError("Unsafe SQL detected")
+
+
+    if not sql:
+        raise ValueError("Unsupported query")
 
     return sql
